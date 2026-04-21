@@ -48,13 +48,20 @@ class VisionScanner {
             let text = sanitizeOcrText(rawText)
             
             // 1. Determine Color by sampling pixels in the bounding box
-            let (color, rgb) = sampleColor(in: box, from: image)
+            let (color, rgb, brightness) = sampleColor(at: CGPoint(x: box.midX, y: box.midY), from: image)
             
             // 2. Map to Regions
             let region = mapCoordinateToRegion(box)
             
             // 3. Log findings
             if let rank = Rank.from(text: text) {
+                // ANTI-GHOSTING: Check if the background is actually white
+                // Background icons have green (low brightness) backgrounds.
+                if brightness < 200 {
+                    Log.debug("Vision Verification: Rejected candidate '\(text)' as Ghost Card. Brightness: \(Int(brightness)) (RGB: \(rgb))")
+                    continue
+                }
+                
                 let card = Card(rank: rank, color: color, suit: nil, location: box)
                 Log.debug("Vision Board Update: Detected \(card) at normalized [X: \(String(format: "%.2f", box.midX)), Y: \(String(format: "%.2f", box.midY))] -> Region: \(region). (RGB Sample: \(rgb))")
                 
@@ -75,25 +82,32 @@ class VisionScanner {
         return text
     }
     
-    private func sampleColor(in normalizedRect: CGRect, from image: CGImage) -> (CardColor, String) {
-        // Sample a point in the middle of the text observation
-        let x = Int(normalizedRect.midX * CGFloat(image.width))
-        let y = Int((1.0 - normalizedRect.midY) * CGFloat(image.height))
+    private func sampleColor(at normalizedPoint: CGPoint, from image: CGImage) -> (CardColor, String, CGFloat) {
+        // Coordinates: 0,0 is bottom-left
+        let x = Int(normalizedPoint.x * CGFloat(image.width))
+        let y = Int((1.0 - normalizedPoint.y) * CGFloat(image.height))
         
         guard let pixelData = image.dataProvider?.data,
-              let data = CFDataGetBytePtr(pixelData) else { return (.black, "N/A") }
+              let data = CFDataGetBytePtr(pixelData) else { return (.black, "N/A", 0) }
         
         let bytesPerRow = image.bytesPerRow
         let offset = (y * bytesPerRow) + (x * 4) // Assuming 32-bit RGBA
         
-        let b = data[offset]
-        let g = data[offset + 1]
-        let r = data[offset + 2]
+        // Safety check
+        if offset + 2 >= CFDataGetLength(pixelData) { return (.black, "N/A", 0) }
+        
+        let b = CGFloat(data[offset])
+        let g = CGFloat(data[offset + 1])
+        let r = CGFloat(data[offset + 2])
         
         // Basic red vs black threshold
         let color: CardColor = (r > 150 && g < 100 && b < 100) ? .red : .black
-        let rgbString = "R:\(r) G:\(g) B:\(b)"
-        return (color, rgbString)
+        let rgbString = "R:\(Int(r)) G:\(Int(g)) B:\(Int(b))"
+        
+        // Average brightness for ghost card detection
+        let brightness = (r + g + b) / 3.0
+        
+        return (color, rgbString, brightness)
     }
     
     private func mapCoordinateToRegion(_ box: CGRect) -> BoardRegion {
